@@ -1,0 +1,30 @@
+[project]
+name = "mistral-ocr"
+version = "0.1.0"
+description = "A command-line tool to convert PDF documents into Markdown using Mistral AI's OCR API"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "okhsunrog"}
+]
+keywords = ["ocr", "pdf", "markdown", "mistral", "ai", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "mistralai>=1.9.10",
+]
+
+[project.scripts]
+mistral-ocr = "main:main"
+
+[project.urls]
+Homepage = "https://github.com/okhsunrog/mistral_ocr"
+Issues = "https://github.com/okhsunrog/mistral_ocr/issues"
