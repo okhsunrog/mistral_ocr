@@ -175,7 +175,7 @@ pub fn run_ocr(
     let temp_pdf: Option<PathBuf>;
     let effective_path;
     if CONVERTIBLE_EXTENSIONS.contains(&ext.as_str()) {
-        eprintln!("Converting .{ext} to PDF via LibreOffice...");
+        log::info!("Converting .{ext} to PDF via LibreOffice...");
         temp_pdf = Some(convert_to_pdf(input_path)?);
         effective_path = temp_pdf.as_deref().unwrap().to_path_buf();
     } else {
@@ -190,7 +190,7 @@ pub fn run_ocr(
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    eprintln!("Encoding file...");
+    log::info!("Encoding file...");
     let b64 = encode_file(&effective_path)?;
 
     let document = if effective_ext == "pdf" {
@@ -224,7 +224,7 @@ pub fn run_ocr(
         include_image_base64,
     };
 
-    eprintln!("Sending OCR request to Mistral API...");
+    log::info!("Sending OCR request to Mistral API...");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()
@@ -242,8 +242,18 @@ pub fn run_ocr(
         bail!("OCR request failed (HTTP {status}): {body}");
     }
 
+    log::info!("Processing response...");
     let ocr: OcrResponse = response.json().context("Failed to parse OCR response")?;
     write_markdown(output_path, &ocr, image_mode)?;
+
+    if image_mode == ImageMode::Zip {
+        log::info!(
+            "Done! Output written to {}",
+            output_path.with_extension("zip").display()
+        );
+    } else {
+        log::info!("Done! Output written to {}", output_path.display());
+    }
     Ok(())
 }
 

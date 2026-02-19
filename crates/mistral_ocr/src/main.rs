@@ -47,18 +47,15 @@ fn main() {
     let cli = Cli::parse();
     let image_mode: ImageMode = cli.images.into();
 
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .format_target(false)
+        .format_timestamp(None)
+        .init();
+
     let api_key = get_api_key();
     if let Err(err) = mistral_ocr::run_ocr(&cli.input, image_mode, &cli.output, &api_key) {
-        eprintln!("Error: {err:#}");
+        log::error!("{err:#}");
         std::process::exit(1);
-    }
-
-    if image_mode == ImageMode::Zip {
-        println!(
-            "OCR output written to {}",
-            cli.output.with_extension("zip").display()
-        );
-    } else {
-        println!("OCR markdown written to {}", cli.output.display());
     }
 }

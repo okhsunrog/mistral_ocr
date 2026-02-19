@@ -6,6 +6,51 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+/// Custom logger that appends messages to a shared string and triggers UI repaint.
+struct GuiLogger {
+    log: Arc<Mutex<String>>,
+    ctx: Mutex<Option<egui::Context>>,
+}
+
+impl GuiLogger {
+    fn new(log: Arc<Mutex<String>>) -> Self {
+        Self {
+            log,
+            ctx: Mutex::new(None),
+        }
+    }
+
+    fn set_ctx(&self, ctx: egui::Context) {
+        *self.ctx.lock().unwrap() = Some(ctx);
+    }
+}
+
+impl log::Log for GuiLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let mut buf = self.log.lock().unwrap();
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        if record.level() == log::Level::Error {
+            buf.push_str(&format!("ERROR: {}", record.args()));
+        } else {
+            buf.push_str(&format!("{}", record.args()));
+        }
+        if let Some(ctx) = self.ctx.lock().unwrap().as_ref() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 struct OcrApp {
     input_path: String,
     image_mode: ImageMode,
@@ -15,15 +60,15 @@ struct OcrApp {
     running: Arc<AtomicBool>,
 }
 
-impl Default for OcrApp {
-    fn default() -> Self {
+impl OcrApp {
+    fn new(log: Arc<Mutex<String>>) -> Self {
         let api_key = std::env::var("MISTRAL_API_KEY").unwrap_or_default();
         Self {
             input_path: String::new(),
             image_mode: ImageMode::None,
             output_path: "ocr_output.md".to_string(),
             api_key,
-            log: Arc::new(Mutex::new(String::new())),
+            log,
             running: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -131,7 +176,7 @@ impl eframe::App for OcrApp {
                     .add_enabled(can_run, egui::Button::new("Run OCR"))
                     .clicked()
                 {
-                    self.start_ocr(ctx.clone());
+                    self.start_ocr();
                 }
                 if is_running {
                     ui.spinner();
@@ -159,7 +204,7 @@ impl eframe::App for OcrApp {
 }
 
 impl OcrApp {
-    fn start_ocr(&mut self, ctx: egui::Context) {
+    fn start_ocr(&mut self) {
         self.log.lock().unwrap().clear();
         self.running.store(true, Ordering::Relaxed);
 
@@ -167,46 +212,24 @@ impl OcrApp {
         let image_mode = self.image_mode;
         let output = PathBuf::from(&self.output_path);
         let api_key = self.api_key.clone();
-        let log = self.log.clone();
         let running = self.running.clone();
 
         std::thread::spawn(move || {
-            let append = |msg: &str| {
-                let mut l = log.lock().unwrap();
-                if !l.is_empty() {
-                    l.push('\n');
-                }
-                l.push_str(msg);
-                ctx.request_repaint();
-            };
-
-            append(&format!("Input: {}", input.display()));
-            append(&format!("Output: {}", output.display()));
-            append("Starting OCR...");
-
-            match mistral_ocr::run_ocr(&input, image_mode, &output, &api_key) {
-                Ok(()) => {
-                    if image_mode == ImageMode::Zip {
-                        append(&format!(
-                            "Done! Output written to {}",
-                            output.with_extension("zip").display()
-                        ));
-                    } else {
-                        append(&format!("Done! Output written to {}", output.display()));
-                    }
-                }
-                Err(e) => {
-                    append(&format!("Error: {e:#}"));
-                }
+            if let Err(e) = mistral_ocr::run_ocr(&input, image_mode, &output, &api_key) {
+                log::error!("{e:#}");
             }
-
             running.store(false, Ordering::Relaxed);
-            ctx.request_repaint();
         });
     }
 }
 
 fn main() -> eframe::Result {
+    let log_buf = Arc::new(Mutex::new(String::new()));
+    let logger: &'static GuiLogger = Box::leak(Box::new(GuiLogger::new(log_buf.clone())));
+    let logger_ref = logger as *const GuiLogger;
+    log::set_logger(logger).expect("failed to set logger");
+    log::set_max_level(log::LevelFilter::Info);
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([600.0, 500.0]),
         ..Default::default()
@@ -214,6 +237,10 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Mistral OCR",
         options,
-        Box::new(|_cc| Ok(Box::<OcrApp>::default())),
+        Box::new(move |cc| {
+            // SAFETY: logger is leaked (lives for 'static), pointer is valid
+            unsafe { &*logger_ref }.set_ctx(cc.egui_ctx.clone());
+            Ok(Box::new(OcrApp::new(log_buf)))
+        }),
     )
 }
