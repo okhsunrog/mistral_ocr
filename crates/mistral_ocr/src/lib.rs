@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+use tracing::info;
 use zip::write::SimpleFileOptions;
 
 const API_URL: &str = "https://api.mistral.ai/v1/ocr";
@@ -175,7 +176,7 @@ pub fn run_ocr(
     let temp_pdf: Option<PathBuf>;
     let effective_path;
     if CONVERTIBLE_EXTENSIONS.contains(&ext.as_str()) {
-        log::info!("Converting .{ext} to PDF via LibreOffice...");
+        info!("Converting .{ext} to PDF via LibreOffice...");
         temp_pdf = Some(convert_to_pdf(input_path)?);
         effective_path = temp_pdf.as_deref().unwrap().to_path_buf();
     } else {
@@ -190,7 +191,7 @@ pub fn run_ocr(
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    log::info!("Encoding file...");
+    info!("Encoding file...");
     let b64 = encode_file(&effective_path)?;
 
     let document = if effective_ext == "pdf" {
@@ -224,7 +225,7 @@ pub fn run_ocr(
         include_image_base64,
     };
 
-    log::info!("Sending OCR request to Mistral API...");
+    info!("Sending OCR request to Mistral API...");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()
@@ -242,17 +243,17 @@ pub fn run_ocr(
         bail!("OCR request failed (HTTP {status}): {body}");
     }
 
-    log::info!("Processing response...");
+    info!("Processing response...");
     let ocr: OcrResponse = response.json().context("Failed to parse OCR response")?;
     write_markdown(output_path, &ocr, image_mode)?;
 
     if image_mode == ImageMode::Zip {
-        log::info!(
+        info!(
             "Done! Output written to {}",
             output_path.with_extension("zip").display()
         );
     } else {
-        log::info!("Done! Output written to {}", output_path.display());
+        info!("Done! Output written to {}", output_path.display());
     }
     Ok(())
 }
