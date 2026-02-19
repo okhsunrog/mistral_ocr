@@ -28,7 +28,7 @@ cargo binstall mistral_ocr
 ### From source
 
 ```bash
-cargo install --git https://github.com/okhsunrog/mistral_ocr.git
+cargo install mistral_ocr
 ```
 
 ## Configuration
