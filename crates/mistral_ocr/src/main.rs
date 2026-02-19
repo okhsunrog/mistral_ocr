@@ -1,6 +1,7 @@
 use clap::{Parser, ValueEnum};
 use mistral_ocr::ImageMode;
 use std::path::PathBuf;
+use tracing::error;
 
 fn get_api_key() -> String {
     std::env::var("MISTRAL_API_KEY").unwrap_or_else(|_| {
@@ -47,15 +48,14 @@ fn main() {
     let cli = Cli::parse();
     let image_mode: ImageMode = cli.images.into();
 
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .format_target(false)
-        .format_timestamp(None)
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .without_time()
         .init();
 
     let api_key = get_api_key();
     if let Err(err) = mistral_ocr::run_ocr(&cli.input, image_mode, &cli.output, &api_key) {
-        log::error!("{err:#}");
+        error!("{err:#}");
         std::process::exit(1);
     }
 }

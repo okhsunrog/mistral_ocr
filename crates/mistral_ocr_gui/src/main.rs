@@ -5,50 +5,57 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use tracing::error;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
-/// Custom logger that appends messages to a shared string and triggers UI repaint.
-struct GuiLogger {
+/// Custom tracing layer that appends messages to a shared string and triggers UI repaint.
+struct GuiLayer {
     log: Arc<Mutex<String>>,
-    ctx: Mutex<Option<egui::Context>>,
+    ctx: Arc<Mutex<Option<egui::Context>>>,
 }
 
-impl GuiLogger {
-    fn new(log: Arc<Mutex<String>>) -> Self {
-        Self {
-            log,
-            ctx: Mutex::new(None),
-        }
-    }
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for GuiLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = MessageVisitor(String::new());
+        event.record(&mut visitor);
+        let message = visitor.0;
 
-    fn set_ctx(&self, ctx: egui::Context) {
-        *self.ctx.lock().unwrap() = Some(ctx);
-    }
-}
-
-impl log::Log for GuiLogger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Info
-    }
-
-    fn log(&self, record: &log::Record) {
-        if !self.enabled(record.metadata()) {
-            return;
-        }
+        let level = *event.metadata().level();
         let mut buf = self.log.lock().unwrap();
         if !buf.is_empty() {
             buf.push('\n');
         }
-        if record.level() == log::Level::Error {
-            buf.push_str(&format!("ERROR: {}", record.args()));
+        if level == tracing::Level::ERROR {
+            buf.push_str(&format!("ERROR: {message}"));
         } else {
-            buf.push_str(&format!("{}", record.args()));
+            buf.push_str(&message);
         }
+
         if let Some(ctx) = self.ctx.lock().unwrap().as_ref() {
             ctx.request_repaint();
         }
     }
+}
 
-    fn flush(&self) {}
+struct MessageVisitor(String);
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0 = value.to_string();
+        }
+    }
 }
 
 struct OcrApp {
@@ -58,10 +65,11 @@ struct OcrApp {
     api_key: String,
     log: Arc<Mutex<String>>,
     running: Arc<AtomicBool>,
+    egui_ctx: Arc<Mutex<Option<egui::Context>>>,
 }
 
 impl OcrApp {
-    fn new(log: Arc<Mutex<String>>) -> Self {
+    fn new(log: Arc<Mutex<String>>, egui_ctx: Arc<Mutex<Option<egui::Context>>>) -> Self {
         let api_key = std::env::var("MISTRAL_API_KEY").unwrap_or_default();
         Self {
             input_path: String::new(),
@@ -70,6 +78,7 @@ impl OcrApp {
             api_key,
             log,
             running: Arc::new(AtomicBool::new(false)),
+            egui_ctx,
         }
     }
 }
@@ -83,6 +92,9 @@ const IMAGE_MODE_LABELS: &[(ImageMode, &str)] = &[
 
 impl eframe::App for OcrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Store the egui context so the tracing layer can request repaints
+        *self.egui_ctx.lock().unwrap() = Some(ctx.clone());
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Mistral OCR");
             ui.add_space(8.0);
@@ -216,7 +228,7 @@ impl OcrApp {
 
         std::thread::spawn(move || {
             if let Err(e) = mistral_ocr::run_ocr(&input, image_mode, &output, &api_key) {
-                log::error!("{e:#}");
+                error!("{e:#}");
             }
             running.store(false, Ordering::Relaxed);
         });
@@ -225,10 +237,17 @@ impl OcrApp {
 
 fn main() -> eframe::Result {
     let log_buf = Arc::new(Mutex::new(String::new()));
-    let logger: &'static GuiLogger = Box::leak(Box::new(GuiLogger::new(log_buf.clone())));
-    let logger_ref = logger as *const GuiLogger;
-    log::set_logger(logger).expect("failed to set logger");
-    log::set_max_level(log::LevelFilter::Info);
+    let egui_ctx: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
+
+    let gui_layer = GuiLayer {
+        log: log_buf.clone(),
+        ctx: egui_ctx.clone(),
+    };
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(gui_layer)
+        .init();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([600.0, 500.0]),
@@ -237,10 +256,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Mistral OCR",
         options,
-        Box::new(move |cc| {
-            // SAFETY: logger is leaked (lives for 'static), pointer is valid
-            unsafe { &*logger_ref }.set_ctx(cc.egui_ctx.clone());
-            Ok(Box::new(OcrApp::new(log_buf)))
-        }),
+        Box::new(move |_cc| Ok(Box::new(OcrApp::new(log_buf, egui_ctx)))),
     )
 }
