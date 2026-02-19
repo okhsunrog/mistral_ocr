@@ -82,8 +82,8 @@ struct OcrImage {
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp"];
 const CONVERTIBLE_EXTENSIONS: &[&str] = &[
-    "doc", "docx", "odt", "rtf", "txt", "html", "htm", "pptx", "ppt", "odp", "xlsx", "xls",
-    "ods", "csv", "epub",
+    "doc", "docx", "odt", "rtf", "txt", "html", "htm", "pptx", "ppt", "odp", "xlsx", "xls", "ods",
+    "csv", "epub",
 ];
 
 fn mime_for_ext(ext: &str) -> &'static str {
@@ -114,9 +114,7 @@ fn convert_to_pdf(input_path: &Path) -> Result<PathBuf> {
         bail!("libreoffice conversion failed: {stderr}");
     }
 
-    let stem = input_path
-        .file_stem()
-        .context("Input file has no stem")?;
+    let stem = input_path.file_stem().context("Input file has no stem")?;
     let pdf_path = temp_dir.join(format!("{}.pdf", stem.to_string_lossy()));
 
     if !pdf_path.exists() {
@@ -130,14 +128,18 @@ fn convert_to_pdf(input_path: &Path) -> Result<PathBuf> {
 }
 
 fn encode_file(path: &Path) -> Result<String> {
-    let data =
-        fs::read(path).with_context(|| format!("File not found: {}", path.display()))?;
+    let data = fs::read(path).with_context(|| format!("File not found: {}", path.display()))?;
     Ok(BASE64.encode(&data))
 }
 
-fn run_ocr(input_path: &Path, model: &str, image_mode: ImageMode, output_path: &Path) -> Result<()> {
-    let api_key =
-        std::env::var("MISTRAL_API_KEY").context("MISTRAL_API_KEY environment variable is not set")?;
+fn run_ocr(
+    input_path: &Path,
+    model: &str,
+    image_mode: ImageMode,
+    output_path: &Path,
+) -> Result<()> {
+    let api_key = std::env::var("MISTRAL_API_KEY")
+        .context("MISTRAL_API_KEY environment variable is not set")?;
 
     let ext = input_path
         .extension()
@@ -291,7 +293,8 @@ fn write_markdown(output_path: &Path, response: &OcrResponse, image_mode: ImageM
         let zip_path = output_path.with_extension("zip");
         let file = fs::File::create(&zip_path).context("Failed to create zip file")?;
         let mut zip = zip::ZipWriter::new(file);
-        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         let md_name = format!("{stem}.md");
         zip.start_file(&md_name, options)?;
@@ -330,7 +333,10 @@ fn main() {
     }
 
     if cli.images == ImageMode::Zip {
-        println!("OCR output written to {}", cli.output.with_extension("zip").display());
+        println!(
+            "OCR output written to {}",
+            cli.output.with_extension("zip").display()
+        );
     } else {
         println!("OCR markdown written to {}", cli.output.display());
     }
