@@ -1,6 +1,6 @@
 [package]
 name = "mistral_ocr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "CLI tool to convert PDF, image, and document files into Markdown using Mistral AI's OCR API"
 authors = ["Danila Gornushko <me@okhsunrog.dev>"]
