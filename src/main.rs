@@ -5,16 +5,16 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use zip::write::SimpleFileOptions;
 
 const API_URL: &str = "https://api.mistral.ai/v1/ocr";
 
 #[derive(Parser)]
-#[command(about = "Run Mistral OCR on a PDF")]
+#[command(about = "Run Mistral OCR on a PDF, image, or document file")]
 struct Cli {
-    /// Path to the PDF file to process
-    #[arg(long)]
-    pdf: PathBuf,
+    /// Path to the input file (PDF, image, or document: docx, odt, pptx, xlsx, etc.)
+    input: PathBuf,
 
     /// Mistral OCR model name
     #[arg(long, default_value = "mistral-ocr-latest")]
@@ -50,10 +50,15 @@ struct OcrRequest {
 }
 
 #[derive(Serialize)]
-struct Document {
-    r#type: String,
-    document_url: String,
-    document_name: String,
+#[serde(tag = "type")]
+enum Document {
+    #[serde(rename = "document_url")]
+    DocumentUrl {
+        document_url: String,
+        document_name: String,
+    },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: String },
 }
 
 #[derive(Deserialize)]
@@ -75,22 +80,112 @@ struct OcrImage {
     image_base64: Option<String>,
 }
 
-fn encode_pdf(pdf_path: &Path) -> Result<String> {
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp"];
+const CONVERTIBLE_EXTENSIONS: &[&str] = &[
+    "doc", "docx", "odt", "rtf", "txt", "html", "htm", "pptx", "ppt", "odp", "xlsx", "xls",
+    "ods", "csv", "epub",
+];
+
+fn mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+fn convert_to_pdf(input_path: &Path) -> Result<PathBuf> {
+    let temp_dir = std::env::temp_dir().join("mistral_ocr");
+    fs::create_dir_all(&temp_dir)?;
+
+    let output = Command::new("libreoffice")
+        .args(["--headless", "--convert-to", "pdf", "--outdir"])
+        .arg(&temp_dir)
+        .arg(input_path)
+        .output()
+        .context("Failed to run libreoffice (is it installed?)")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("libreoffice conversion failed: {stderr}");
+    }
+
+    let stem = input_path
+        .file_stem()
+        .context("Input file has no stem")?;
+    let pdf_path = temp_dir.join(format!("{}.pdf", stem.to_string_lossy()));
+
+    if !pdf_path.exists() {
+        bail!(
+            "libreoffice did not produce expected PDF at {}",
+            pdf_path.display()
+        );
+    }
+
+    Ok(pdf_path)
+}
+
+fn encode_file(path: &Path) -> Result<String> {
     let data =
-        fs::read(pdf_path).with_context(|| format!("PDF not found: {}", pdf_path.display()))?;
+        fs::read(path).with_context(|| format!("File not found: {}", path.display()))?;
     Ok(BASE64.encode(&data))
 }
 
-fn run_ocr(pdf_path: &Path, model: &str, image_mode: ImageMode, output_path: &Path) -> Result<()> {
+fn run_ocr(input_path: &Path, model: &str, image_mode: ImageMode, output_path: &Path) -> Result<()> {
     let api_key =
         std::env::var("MISTRAL_API_KEY").context("MISTRAL_API_KEY environment variable is not set")?;
 
-    let base64_pdf = encode_pdf(pdf_path)?;
-
-    let file_name = pdf_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
+    let ext = input_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
+
+    // Convert office documents to PDF via LibreOffice
+    let (effective_path, _temp_pdf);
+    if CONVERTIBLE_EXTENSIONS.contains(&ext.as_str()) {
+        eprintln!("Converting {ext} to PDF via LibreOffice...");
+        _temp_pdf = Some(convert_to_pdf(input_path)?);
+        effective_path = _temp_pdf.as_ref().unwrap().as_path();
+    } else {
+        _temp_pdf = None;
+        effective_path = input_path;
+    }
+
+    let effective_ext = effective_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let b64 = encode_file(effective_path)?;
+
+    let document = if effective_ext == "pdf" {
+        let file_name = input_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Document::DocumentUrl {
+            document_url: format!("data:application/pdf;base64,{b64}"),
+            document_name: file_name,
+        }
+    } else if IMAGE_EXTENSIONS.contains(&effective_ext.as_str()) {
+        let mime = mime_for_ext(&effective_ext);
+        Document::ImageUrl {
+            image_url: format!("data:{mime};base64,{b64}"),
+        }
+    } else {
+        bail!(
+            "Unsupported file type: .{ext} (expected pdf, image, or document: docx, odt, pptx, xlsx, etc.)"
+        );
+    };
+
+    // Clean up temp PDF
+    if let Some(ref temp) = _temp_pdf {
+        let _ = fs::remove_file(temp);
+    }
 
     let include_image_base64 = match image_mode {
         ImageMode::None => None,
@@ -99,11 +194,7 @@ fn run_ocr(pdf_path: &Path, model: &str, image_mode: ImageMode, output_path: &Pa
 
     let request = OcrRequest {
         model: model.to_string(),
-        document: Document {
-            r#type: "document_url".to_string(),
-            document_url: format!("data:application/pdf;base64,{base64_pdf}"),
-            document_name: file_name,
-        },
+        document,
         include_image_base64,
     };
 
@@ -233,7 +324,7 @@ fn decode_image_base64(b64_data: &str, id: &str) -> Result<Vec<u8>> {
 fn main() {
     let cli = Cli::parse();
 
-    if let Err(err) = run_ocr(&cli.pdf, &cli.model, cli.images, &cli.output) {
+    if let Err(err) = run_ocr(&cli.input, &cli.model, cli.images, &cli.output) {
         eprintln!("Error: {err:#}");
         std::process::exit(1);
     }
