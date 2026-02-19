@@ -16,22 +16,19 @@ A command-line tool to convert PDF, image, and document files into Markdown usin
 
 ### Prerequisites
 
-- [Rust toolchain](https://rustup.rs/)
 - A [Mistral API key](https://console.mistral.ai/)
 - [LibreOffice](https://www.libreoffice.org/) (only needed for office document conversion)
 
-### Install
+### Pre-built binary (recommended)
 
 ```bash
-cargo install --git https://github.com/okhsunrog/mistral_ocr.git --root ~/.local
+cargo binstall mistral_ocr
 ```
 
-Or build from source:
+### From source
 
 ```bash
-git clone https://github.com/okhsunrog/mistral_ocr.git
-cd mistral_ocr
-cargo install --path . --root ~/.local
+cargo install --git https://github.com/okhsunrog/mistral_ocr.git
 ```
 
 ## Configuration
