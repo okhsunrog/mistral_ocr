@@ -10,7 +10,7 @@ use zip::write::SimpleFileOptions;
 
 const API_URL: &str = "https://api.mistral.ai/v1/ocr";
 
-pub const DEFAULT_MODEL: &str = "mistral-ocr-latest";
+const MODEL: &str = "mistral-ocr-latest";
 
 pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp"];
 pub const CONVERTIBLE_EXTENSIONS: &[&str] = &[
@@ -163,7 +163,6 @@ fn encode_file(path: &Path) -> Result<String> {
 
 pub fn run_ocr(
     input_path: &Path,
-    model: &str,
     image_mode: ImageMode,
     output_path: &Path,
     api_key: &str,
@@ -220,7 +219,7 @@ pub fn run_ocr(
     };
 
     let request = OcrRequest {
-        model: model.to_string(),
+        model: MODEL.to_string(),
         document,
         include_image_base64,
     };

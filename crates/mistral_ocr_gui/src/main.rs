@@ -8,7 +8,6 @@ use std::sync::{
 
 struct OcrApp {
     input_path: String,
-    model: String,
     image_mode: ImageMode,
     output_path: String,
     api_key: String,
@@ -21,7 +20,6 @@ impl Default for OcrApp {
         let api_key = std::env::var("MISTRAL_API_KEY").unwrap_or_default();
         Self {
             input_path: String::new(),
-            model: mistral_ocr::DEFAULT_MODEL.to_string(),
             image_mode: ImageMode::None,
             output_path: "ocr_output.md".to_string(),
             api_key,
@@ -104,12 +102,6 @@ impl eframe::App for OcrApp {
                     ui.label("");
                     ui.end_row();
 
-                    // Model
-                    ui.label("Model:");
-                    ui.add(egui::TextEdit::singleline(&mut self.model).desired_width(400.0));
-                    ui.label("");
-                    ui.end_row();
-
                     // Image mode
                     ui.label("Images:");
                     let current_label = IMAGE_MODE_LABELS
@@ -172,7 +164,6 @@ impl OcrApp {
         self.running.store(true, Ordering::Relaxed);
 
         let input = PathBuf::from(&self.input_path);
-        let model = self.model.clone();
         let image_mode = self.image_mode;
         let output = PathBuf::from(&self.output_path);
         let api_key = self.api_key.clone();
@@ -191,10 +182,9 @@ impl OcrApp {
 
             append(&format!("Input: {}", input.display()));
             append(&format!("Output: {}", output.display()));
-            append(&format!("Model: {model}"));
             append("Starting OCR...");
 
-            match mistral_ocr::run_ocr(&input, &model, image_mode, &output, &api_key) {
+            match mistral_ocr::run_ocr(&input, image_mode, &output, &api_key) {
                 Ok(()) => {
                     if image_mode == ImageMode::Zip {
                         append(&format!(

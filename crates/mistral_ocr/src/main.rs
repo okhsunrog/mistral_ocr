@@ -15,10 +15,6 @@ struct Cli {
     /// Path to the input file (PDF, image, or document: docx, odt, pptx, xlsx, etc.)
     input: PathBuf,
 
-    /// Mistral OCR model name
-    #[arg(long, default_value = mistral_ocr::DEFAULT_MODEL)]
-    model: String,
-
     /// How to handle images: none, separate (save to _images/ dir), inline (embed base64 in markdown), zip (bundle md + images into a .zip)
     #[arg(long, value_enum, default_value_t = CliImageMode::None)]
     images: CliImageMode,
@@ -52,9 +48,7 @@ fn main() {
     let image_mode: ImageMode = cli.images.into();
 
     let api_key = get_api_key();
-    if let Err(err) =
-        mistral_ocr::run_ocr(&cli.input, &cli.model, image_mode, &cli.output, &api_key)
-    {
+    if let Err(err) = mistral_ocr::run_ocr(&cli.input, image_mode, &cli.output, &api_key) {
         eprintln!("Error: {err:#}");
         std::process::exit(1);
     }

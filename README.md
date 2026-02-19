@@ -96,7 +96,6 @@ mistral_ocr document.pdf --images zip
 
 ```
 <INPUT>               Path to the input file (required)
---model <MODEL>       Mistral OCR model name (default: mistral-ocr-latest)
 --images <MODE>       How to handle images: none, separate, inline, zip (default: none)
 --output <PATH>       Where to write the output (default: ocr_output.md)
 ```
