@@ -1,45 +1,60 @@
 # Mistral OCR
 
-A command-line tool to convert PDF, image, and document files into Markdown using [Mistral AI's OCR API](https://docs.mistral.ai/capabilities/document_ai/basic_ocr). Written in Rust.
+Convert PDF, image, and document files into Markdown using [Mistral AI's OCR API](https://docs.mistral.ai/capabilities/document_ai/basic_ocr). Written in Rust.
+
+Available as a **CLI tool** (`mistral_ocr`) and a **GUI app** (`mistral_ocr_gui`).
 
 ## Features
 
 - Supports PDF, images (jpg, png, gif, bmp, tiff, webp), and office documents (docx, odt, pptx, xlsx, etc.)
-- Office documents are automatically converted to PDF via LibreOffice
+- **PDF and image files require no external dependencies** — just the binary and an API key
+- Office documents (docx, odt, pptx, etc.) are automatically converted to PDF via LibreOffice
 - Multiple image handling modes:
   - **separate** — save images as files in a `_images/` directory
   - **inline** — embed images as base64 data URIs (single self-contained `.md` file)
   - **zip** — bundle markdown + images into a single `.zip` archive
-- Single static binary, no runtime dependencies
+- Cross-platform: works on Linux, macOS, and Windows
 
 ## Installation
 
 ### Prerequisites
 
 - A [Mistral API key](https://console.mistral.ai/)
-- [LibreOffice](https://www.libreoffice.org/) (only needed for office document conversion)
+- [LibreOffice](https://www.libreoffice.org/) — **only** needed if you process office documents (docx, odt, pptx, xlsx, etc.). Not required for PDF or image files.
 
-### Pre-built binary (recommended)
+### CLI (pre-built binary)
 
 ```bash
 cargo binstall mistral_ocr
 ```
 
-### From source
+### CLI (from source)
 
 ```bash
 cargo install mistral_ocr
 ```
 
+### GUI (pre-built binary)
+
+```bash
+cargo binstall mistral_ocr_gui
+```
+
+### GUI (from source)
+
+```bash
+cargo install mistral_ocr_gui
+```
+
 ## Configuration
 
-Set your Mistral API key as an environment variable:
+Set your Mistral API key as an environment variable (the GUI also accepts it in the UI):
 
 ```bash
 export MISTRAL_API_KEY='your-api-key-here'
 ```
 
-## Usage
+## CLI Usage
 
 ### Basic usage (text only)
 
@@ -88,11 +103,18 @@ mistral_ocr document.pdf --images zip
 
 ### Supported file types
 
-| Type | Extensions |
-|------|-----------|
-| PDF | pdf |
-| Images | jpg, jpeg, png, gif, bmp, tiff, webp |
-| Documents (via LibreOffice) | doc, docx, odt, rtf, txt, html, pptx, ppt, odp, xlsx, xls, ods, csv, epub |
+| Type | Extensions | Requires LibreOffice? |
+|------|-----------|:---------------------:|
+| PDF | pdf | No |
+| Images | jpg, jpeg, png, gif, bmp, tiff, webp | No |
+| Documents | doc, docx, odt, rtf, txt, html, pptx, ppt, odp, xlsx, xls, ods, csv, epub | Yes |
+
+## Project Structure
+
+This is a Cargo workspace with two crates:
+
+- **`mistral_ocr`** — library + CLI binary (published on [crates.io](https://crates.io/crates/mistral_ocr))
+- **`mistral_ocr_gui`** — GUI binary using egui
 
 ## License
 

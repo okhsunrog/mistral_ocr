@@ -21,6 +21,8 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -40,18 +42,35 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
-      - name: Package
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../mistral_ocr-${{ matrix.target }}.tar.gz mistral_ocr
+          tar czf ../../../mistral_ocr_gui-${{ matrix.target }}.tar.gz mistral_ocr_gui
           cd ../../..
 
-      - name: Upload artifact
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../mistral_ocr-${{ matrix.target }}.zip mistral_ocr.exe
+          7z a ../../../mistral_ocr_gui-${{ matrix.target }}.zip mistral_ocr_gui.exe
+          cd ../../..
+
+      - name: Upload CLI artifact
         uses: actions/upload-artifact@v4
         with:
           name: mistral_ocr-${{ matrix.target }}
-          path: mistral_ocr-${{ matrix.target }}.tar.gz
+          path: mistral_ocr-${{ matrix.target }}.*
+
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mistral_ocr_gui-${{ matrix.target }}
+          path: mistral_ocr_gui-${{ matrix.target }}.*
 
   release:
     needs: build
@@ -64,5 +83,9 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: mistral_ocr-*.tar.gz
+          files: |
+            mistral_ocr-*.tar.gz
+            mistral_ocr-*.zip
+            mistral_ocr_gui-*.tar.gz
+            mistral_ocr_gui-*.zip
           generate_release_notes: true

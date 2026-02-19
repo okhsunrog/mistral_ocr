@@ -1,0 +1,22 @@
+[package]
+name = "mistral_ocr_gui"
+version = "0.1.0"
+edition = "2024"
+description = "GUI tool for Mistral OCR - convert documents to Markdown using Mistral AI"
+authors = ["Danila Gornushko <me@okhsunrog.dev>"]
+license = "MIT"
+repository = "https://github.com/okhsunrog/mistral_ocr"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.zip"
+pkg-fmt = "zip"
+
+[dependencies]
+eframe = "0.33.3"
+mistral_ocr = { path = "../mistral_ocr" }
+rfd = "0.17.2"

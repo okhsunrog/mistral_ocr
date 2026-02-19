@@ -1,44 +1,37 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 use zip::write::SimpleFileOptions;
 
 const API_URL: &str = "https://api.mistral.ai/v1/ocr";
 
-#[derive(Parser)]
-#[command(about = "Run Mistral OCR on a PDF, image, or document file")]
-struct Cli {
-    /// Path to the input file (PDF, image, or document: docx, odt, pptx, xlsx, etc.)
-    input: PathBuf,
+pub const DEFAULT_MODEL: &str = "mistral-ocr-latest";
 
-    /// Mistral OCR model name
-    #[arg(long, default_value = "mistral-ocr-latest")]
-    model: String,
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp"];
+pub const CONVERTIBLE_EXTENSIONS: &[&str] = &[
+    "doc", "docx", "odt", "rtf", "txt", "html", "htm", "pptx", "ppt", "odp", "xlsx", "xls", "ods",
+    "csv", "epub",
+];
 
-    /// How to handle images: none, separate (save to _images/ dir), inline (embed base64 in markdown), zip (bundle md + images into a .zip)
-    #[arg(long, value_enum, default_value_t = ImageMode::None)]
-    images: ImageMode,
-
-    /// Where to write the output (.md file, or .zip when --images zip)
-    #[arg(long, default_value = "ocr_output.md")]
-    output: PathBuf,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImageMode {
+    None,
+    Separate,
+    Inline,
+    Zip,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ImageMode {
-    /// Don't include images
-    None,
-    /// Save images as separate files in a _images/ directory
-    Separate,
-    /// Embed images as base64 data URIs inline in the markdown
-    Inline,
-    /// Bundle markdown + image files into a single .zip archive
-    Zip,
+/// RAII guard that removes a temp file on drop.
+struct TempCleanup(PathBuf);
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 #[derive(Serialize)]
@@ -80,12 +73,6 @@ struct OcrImage {
     image_base64: Option<String>,
 }
 
-const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp"];
-const CONVERTIBLE_EXTENSIONS: &[&str] = &[
-    "doc", "docx", "odt", "rtf", "txt", "html", "htm", "pptx", "ppt", "odp", "xlsx", "xls", "ods",
-    "csv", "epub",
-];
-
 fn mime_for_ext(ext: &str) -> &'static str {
     match ext {
         "jpg" | "jpeg" => "image/jpeg",
@@ -98,16 +85,58 @@ fn mime_for_ext(ext: &str) -> &'static str {
     }
 }
 
+fn find_libreoffice() -> Result<PathBuf> {
+    for name in &["libreoffice", "soffice"] {
+        if let Ok(output) = Command::new("which").arg(name).output()
+            && output.status.success()
+        {
+            return Ok(PathBuf::from(name));
+        }
+        if let Ok(output) = Command::new("where").arg(name).output()
+            && output.status.success()
+        {
+            return Ok(PathBuf::from(name));
+        }
+    }
+
+    let candidates: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            "/opt/homebrew/bin/soffice",
+        ]
+    } else if cfg!(target_os = "windows") {
+        &[
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ]
+    } else {
+        &["/usr/bin/libreoffice", "/usr/bin/soffice"]
+    };
+
+    for path in candidates {
+        if Path::new(path).exists() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+
+    bail!(
+        "LibreOffice not found. Install it from https://www.libreoffice.org/\n\
+         LibreOffice is only needed for office document conversion (docx, odt, pptx, etc.).\n\
+         PDF and image files work without it."
+    )
+}
+
 fn convert_to_pdf(input_path: &Path) -> Result<PathBuf> {
+    let lo_bin = find_libreoffice()?;
     let temp_dir = std::env::temp_dir().join("mistral_ocr");
     fs::create_dir_all(&temp_dir)?;
 
-    let output = Command::new("libreoffice")
+    let output = Command::new(&lo_bin)
         .args(["--headless", "--convert-to", "pdf", "--outdir"])
         .arg(&temp_dir)
         .arg(input_path)
         .output()
-        .context("Failed to run libreoffice (is it installed?)")?;
+        .with_context(|| format!("Failed to run LibreOffice at {}", lo_bin.display()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -132,37 +161,38 @@ fn encode_file(path: &Path) -> Result<String> {
     Ok(BASE64.encode(&data))
 }
 
-fn run_ocr(
+pub fn run_ocr(
     input_path: &Path,
     model: &str,
     image_mode: ImageMode,
     output_path: &Path,
+    api_key: &str,
 ) -> Result<()> {
-    let api_key = std::env::var("MISTRAL_API_KEY")
-        .context("MISTRAL_API_KEY environment variable is not set")?;
-
     let ext = input_path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    // Convert office documents to PDF via LibreOffice
-    let (effective_path, _temp_pdf);
+    let temp_pdf: Option<PathBuf>;
+    let effective_path;
     if CONVERTIBLE_EXTENSIONS.contains(&ext.as_str()) {
-        eprintln!("Converting {ext} to PDF via LibreOffice...");
-        _temp_pdf = Some(convert_to_pdf(input_path)?);
-        effective_path = _temp_pdf.as_ref().unwrap().as_path();
+        eprintln!("Converting .{ext} to PDF via LibreOffice...");
+        temp_pdf = Some(convert_to_pdf(input_path)?);
+        effective_path = temp_pdf.as_deref().unwrap().to_path_buf();
     } else {
-        _temp_pdf = None;
-        effective_path = input_path;
+        temp_pdf = None;
+        effective_path = input_path.to_path_buf();
     }
+
+    let _cleanup = temp_pdf.as_ref().map(|p| TempCleanup(p.clone()));
 
     let effective_ext = effective_path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    let b64 = encode_file(effective_path)?;
+    eprintln!("Encoding file...");
+    let b64 = encode_file(&effective_path)?;
 
     let document = if effective_ext == "pdf" {
         let file_name = input_path
@@ -184,11 +214,6 @@ fn run_ocr(
         );
     };
 
-    // Clean up temp PDF
-    if let Some(ref temp) = _temp_pdf {
-        let _ = fs::remove_file(temp);
-    }
-
     let include_image_base64 = match image_mode {
         ImageMode::None => None,
         ImageMode::Separate | ImageMode::Inline | ImageMode::Zip => Some(true),
@@ -200,10 +225,14 @@ fn run_ocr(
         include_image_base64,
     };
 
-    let client = reqwest::blocking::Client::new();
+    eprintln!("Sending OCR request to Mistral API...");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .context("Failed to build HTTP client")?;
     let response = client
         .post(API_URL)
-        .bearer_auth(&api_key)
+        .bearer_auth(api_key)
         .json(&request)
         .send()
         .context("OCR request failed")?;
@@ -240,11 +269,11 @@ fn write_markdown(output_path: &Path, response: &OcrResponse, image_mode: ImageM
         None
     };
 
-    // For zip mode: image filename in zip -> decoded bytes
     let mut zip_images: Vec<(String, Vec<u8>)> = Vec::new();
     let images_subdir = "images";
 
     let mut output = String::new();
+    let multi_page = response.pages.len() > 1;
 
     for page in &response.pages {
         let mut md = page.markdown.trim_end().to_string();
@@ -270,7 +299,12 @@ fn write_markdown(output_path: &Path, response: &OcrResponse, image_mode: ImageM
                         let data_uri = if b64_data.starts_with("data:") {
                             b64_data.clone()
                         } else {
-                            format!("data:image/jpeg;base64,{b64_data}")
+                            let img_ext = Path::new(id)
+                                .extension()
+                                .map(|e| e.to_string_lossy().to_lowercase())
+                                .unwrap_or_else(|| "jpeg".to_string());
+                            let mime = mime_for_ext(&img_ext);
+                            format!("data:{mime};base64,{b64_data}")
                         };
                         md = md.replace(&old_ref, &format!("]({data_uri})"));
                     }
@@ -284,7 +318,9 @@ fn write_markdown(output_path: &Path, response: &OcrResponse, image_mode: ImageM
             }
         }
 
-        output.push_str(&format!("# Page {}\n\n", page.index + 1));
+        if multi_page {
+            output.push_str(&format!("# Page {}\n\n", page.index + 1));
+        }
         output.push_str(&md);
         output.push_str("\n\n");
     }
@@ -322,22 +358,4 @@ fn decode_image_base64(b64_data: &str, id: &str) -> Result<Vec<u8>> {
     BASE64
         .decode(raw)
         .with_context(|| format!("Failed to decode base64 for image {id}"))
-}
-
-fn main() {
-    let cli = Cli::parse();
-
-    if let Err(err) = run_ocr(&cli.input, &cli.model, cli.images, &cli.output) {
-        eprintln!("Error: {err:#}");
-        std::process::exit(1);
-    }
-
-    if cli.images == ImageMode::Zip {
-        println!(
-            "OCR output written to {}",
-            cli.output.with_extension("zip").display()
-        );
-    } else {
-        println!("OCR markdown written to {}", cli.output.display());
-    }
 }
