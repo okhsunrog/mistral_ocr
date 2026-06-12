@@ -1,5 +1,5 @@
 use eframe::egui;
-use mistral_ocr::ImageMode;
+use mistral_ocr::{ImageMode, OcrOptions};
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
@@ -62,6 +62,9 @@ struct OcrApp {
     input_path: String,
     image_mode: ImageMode,
     output_path: String,
+    /// Output path tracks the input file name until the user edits it manually.
+    output_auto: bool,
+    page_headers: bool,
     api_key: String,
     log: Arc<Mutex<String>>,
     running: Arc<AtomicBool>,
@@ -74,12 +77,21 @@ impl OcrApp {
         Self {
             input_path: String::new(),
             image_mode: ImageMode::None,
-            output_path: "ocr_output.md".to_string(),
+            output_path: String::new(),
+            output_auto: true,
+            page_headers: true,
             api_key,
             log,
             running: Arc::new(AtomicBool::new(false)),
             egui_ctx,
         }
+    }
+
+    fn derived_output(&self) -> String {
+        PathBuf::from(&self.input_path)
+            .with_extension("md")
+            .display()
+            .to_string()
     }
 }
 
@@ -131,13 +143,23 @@ impl eframe::App for OcrApp {
                         );
                         if let Some(path) = dialog.pick_file() {
                             self.input_path = path.display().to_string();
+                            if self.output_auto {
+                                self.output_path = self.derived_output();
+                            }
                         }
                     }
                     ui.end_row();
 
                     // Output file
                     ui.label("Output file:");
-                    ui.add(egui::TextEdit::singleline(&mut self.output_path).desired_width(400.0));
+                    let output_edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.output_path)
+                            .desired_width(400.0)
+                            .hint_text("defaults to <input>.md"),
+                    );
+                    if output_edit.changed() {
+                        self.output_auto = false;
+                    }
                     if ui.button("Browse...").clicked()
                         && let Some(path) = rfd::FileDialog::new()
                             .set_title("Save output as")
@@ -145,6 +167,7 @@ impl eframe::App for OcrApp {
                             .save_file()
                     {
                         self.output_path = path.display().to_string();
+                        self.output_auto = false;
                     }
                     ui.end_row();
 
@@ -174,6 +197,12 @@ impl eframe::App for OcrApp {
                                 ui.selectable_value(&mut self.image_mode, *mode, *label);
                             }
                         });
+                    ui.label("");
+                    ui.end_row();
+
+                    // Page headers
+                    ui.label("Page headers:");
+                    ui.checkbox(&mut self.page_headers, "Insert `# Page N` between pages");
                     ui.label("");
                     ui.end_row();
                 });
@@ -221,13 +250,20 @@ impl OcrApp {
         self.running.store(true, Ordering::Relaxed);
 
         let input = PathBuf::from(&self.input_path);
-        let image_mode = self.image_mode;
-        let output = PathBuf::from(&self.output_path);
+        let options = OcrOptions {
+            image_mode: self.image_mode,
+            page_headers: self.page_headers,
+        };
+        let output = if self.output_path.is_empty() {
+            input.with_extension("md")
+        } else {
+            PathBuf::from(&self.output_path)
+        };
         let api_key = self.api_key.clone();
         let running = self.running.clone();
 
         std::thread::spawn(move || {
-            if let Err(e) = mistral_ocr::run_ocr(&input, image_mode, &output, &api_key) {
+            if let Err(e) = mistral_ocr::run_ocr(&input, options, &output, &api_key) {
                 error!("{e:#}");
             }
             running.store(false, Ordering::Relaxed);
@@ -245,7 +281,11 @@ fn main() -> eframe::Result {
     };
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        // rustls-platform-verifier warns about unreadable files in the system
+        // cert store; harmless noise as long as roots load
+        .with(tracing_subscriber::EnvFilter::new(
+            "info,rustls_platform_verifier=error",
+        ))
         .with(gui_layer)
         .init();
 

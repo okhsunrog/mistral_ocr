@@ -6,12 +6,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 use zip::write::SimpleFileOptions;
 
 const API_URL: &str = "https://api.mistral.ai/v1/ocr";
 
 const MODEL: &str = "mistral-ocr-latest";
+
+/// Mistral's documented upload limit for OCR documents.
+const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+const MAX_ATTEMPTS: u32 = 3;
 
 pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp"];
 pub const CONVERTIBLE_EXTENSIONS: &[&str] = &[
@@ -162,12 +167,30 @@ fn encode_file(path: &Path) -> Result<String> {
     Ok(BASE64.encode(&data))
 }
 
+/// Options controlling OCR output rendering.
+#[derive(Clone, Copy, Debug)]
+pub struct OcrOptions {
+    pub image_mode: ImageMode,
+    /// Insert `# Page N` headers between pages of multi-page documents.
+    pub page_headers: bool,
+}
+
+impl Default for OcrOptions {
+    fn default() -> Self {
+        Self {
+            image_mode: ImageMode::None,
+            page_headers: true,
+        }
+    }
+}
+
 pub fn run_ocr(
     input_path: &Path,
-    image_mode: ImageMode,
+    options: OcrOptions,
     output_path: &Path,
     api_key: &str,
 ) -> Result<()> {
+    let image_mode = options.image_mode;
     let ext = input_path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -190,6 +213,17 @@ pub fn run_ocr(
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
+
+    let file_size = fs::metadata(&effective_path)
+        .with_context(|| format!("File not found: {}", effective_path.display()))?
+        .len();
+    if file_size > MAX_FILE_SIZE {
+        bail!(
+            "File is {:.1} MB, which exceeds the Mistral OCR upload limit of {} MB",
+            file_size as f64 / (1024.0 * 1024.0),
+            MAX_FILE_SIZE / (1024 * 1024)
+        );
+    }
 
     info!("Encoding file...");
     let b64 = encode_file(&effective_path)?;
@@ -230,12 +264,43 @@ pub fn run_ocr(
         .timeout(Duration::from_secs(300))
         .build()
         .context("Failed to build HTTP client")?;
-    let response = client
-        .post(API_URL)
-        .bearer_auth(api_key)
-        .json(&request)
-        .send()
-        .context("OCR request failed")?;
+
+    let mut attempt = 0;
+    let response = loop {
+        attempt += 1;
+        let result = client
+            .post(API_URL)
+            .bearer_auth(api_key)
+            .json(&request)
+            .send();
+
+        let retry_delay = Duration::from_secs(1 << attempt); // 2s, 4s
+        match result {
+            Ok(resp) => {
+                let status = resp.status();
+                let transient =
+                    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                if transient && attempt < MAX_ATTEMPTS {
+                    warn!(
+                        "OCR request failed (HTTP {status}), retrying in {}s (attempt {attempt}/{MAX_ATTEMPTS})...",
+                        retry_delay.as_secs()
+                    );
+                    std::thread::sleep(retry_delay);
+                    continue;
+                }
+                break resp;
+            }
+            Err(err) if (err.is_timeout() || err.is_connect()) && attempt < MAX_ATTEMPTS => {
+                warn!(
+                    "OCR request failed ({err}), retrying in {}s (attempt {attempt}/{MAX_ATTEMPTS})...",
+                    retry_delay.as_secs()
+                );
+                std::thread::sleep(retry_delay);
+                continue;
+            }
+            Err(err) => return Err(err).context("OCR request failed"),
+        }
+    };
 
     if !response.status().is_success() {
         let status = response.status();
@@ -245,7 +310,7 @@ pub fn run_ocr(
 
     info!("Processing response...");
     let ocr: OcrResponse = response.json().context("Failed to parse OCR response")?;
-    write_markdown(output_path, &ocr, image_mode)?;
+    write_markdown(output_path, &ocr, options)?;
 
     if image_mode == ImageMode::Zip {
         info!(
@@ -258,7 +323,8 @@ pub fn run_ocr(
     Ok(())
 }
 
-fn write_markdown(output_path: &Path, response: &OcrResponse, image_mode: ImageMode) -> Result<()> {
+fn write_markdown(output_path: &Path, response: &OcrResponse, options: OcrOptions) -> Result<()> {
+    let image_mode = options.image_mode;
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -291,6 +357,13 @@ fn write_markdown(output_path: &Path, response: &OcrResponse, image_mode: ImageM
         if image_mode != ImageMode::None {
             for img in &page.images {
                 let (Some(id), Some(b64_data)) = (&img.id, &img.image_base64) else {
+                    match &img.id {
+                        Some(id) => warn!(
+                            "Image {id} on page {} has no data; its link will be dangling",
+                            page.index + 1
+                        ),
+                        None => warn!("Image without id on page {} skipped", page.index + 1),
+                    }
                     continue;
                 };
                 let old_ref = format!("]({id})");
@@ -328,7 +401,7 @@ fn write_markdown(output_path: &Path, response: &OcrResponse, image_mode: ImageM
             }
         }
 
-        if multi_page {
+        if multi_page && options.page_headers {
             output.push_str(&format!("# Page {}\n\n", page.index + 1));
         }
         output.push_str(&md);
@@ -368,4 +441,139 @@ fn decode_image_base64(b64_data: &str, id: &str) -> Result<Vec<u8>> {
     BASE64
         .decode(raw)
         .with_context(|| format!("Failed to decode base64 for image {id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    fn sample_response() -> OcrResponse {
+        OcrResponse {
+            pages: vec![
+                OcrPage {
+                    index: 0,
+                    markdown: "# Title\n\n![img-0.jpeg](img-0.jpeg)".to_string(),
+                    images: vec![OcrImage {
+                        id: Some("img-0.jpeg".to_string()),
+                        image_base64: Some(format!(
+                            "data:image/jpeg;base64,{}",
+                            BASE64.encode(b"fake-jpeg-data")
+                        )),
+                    }],
+                },
+                OcrPage {
+                    index: 1,
+                    markdown: "Second page".to_string(),
+                    images: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn decode_plain_base64() {
+        let decoded = decode_image_base64(&BASE64.encode(b"hello"), "x").unwrap();
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn decode_data_uri_base64() {
+        let data = format!("data:image/png;base64,{}", BASE64.encode(b"hello"));
+        let decoded = decode_image_base64(&data, "x").unwrap();
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn decode_invalid_base64_fails() {
+        assert!(decode_image_base64("not base64!!!", "x").is_err());
+    }
+
+    #[test]
+    fn separate_mode_rewrites_links_and_writes_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("doc.md");
+        let options = OcrOptions {
+            image_mode: ImageMode::Separate,
+            page_headers: true,
+        };
+        write_markdown(&out, &sample_response(), options).unwrap();
+
+        let md = fs::read_to_string(&out).unwrap();
+        assert!(md.contains("![img-0.jpeg](doc_images/img-0.jpeg)"));
+        assert!(md.contains("# Page 1"));
+        assert!(md.contains("# Page 2"));
+        let img = fs::read(dir.path().join("doc_images/img-0.jpeg")).unwrap();
+        assert_eq!(img, b"fake-jpeg-data");
+    }
+
+    #[test]
+    fn page_headers_can_be_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("doc.md");
+        let options = OcrOptions {
+            image_mode: ImageMode::None,
+            page_headers: false,
+        };
+        write_markdown(&out, &sample_response(), options).unwrap();
+
+        let md = fs::read_to_string(&out).unwrap();
+        assert!(!md.contains("# Page"));
+        assert!(md.contains("Second page"));
+    }
+
+    #[test]
+    fn zip_mode_bundles_markdown_and_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("doc.md");
+        let options = OcrOptions {
+            image_mode: ImageMode::Zip,
+            page_headers: true,
+        };
+        write_markdown(&out, &sample_response(), options).unwrap();
+
+        let file = fs::File::open(dir.path().join("doc.zip")).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+
+        let mut md = String::new();
+        archive
+            .by_name("doc.md")
+            .unwrap()
+            .read_to_string(&mut md)
+            .unwrap();
+        assert!(md.contains("![img-0.jpeg](images/img-0.jpeg)"));
+
+        let mut img = Vec::new();
+        archive
+            .by_name("images/img-0.jpeg")
+            .unwrap()
+            .read_to_end(&mut img)
+            .unwrap();
+        assert_eq!(img, b"fake-jpeg-data");
+    }
+
+    #[test]
+    fn image_without_data_keeps_original_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("doc.md");
+        let response = OcrResponse {
+            pages: vec![OcrPage {
+                index: 0,
+                markdown: "![img-0.jpeg](img-0.jpeg)".to_string(),
+                images: vec![OcrImage {
+                    id: Some("img-0.jpeg".to_string()),
+                    image_base64: None,
+                }],
+            }],
+        };
+        let options = OcrOptions {
+            image_mode: ImageMode::Separate,
+            page_headers: true,
+        };
+        write_markdown(&out, &response, options).unwrap();
+
+        let md = fs::read_to_string(&out).unwrap();
+        assert!(md.contains("![img-0.jpeg](img-0.jpeg)"));
+        assert!(!dir.path().join("doc_images").exists());
+    }
 }

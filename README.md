@@ -97,7 +97,8 @@ mistral_ocr document.pdf --images zip
 ```
 <INPUT>               Path to the input file (required)
 --images <MODE>       How to handle images: none, separate, inline, zip (default: none)
---output <PATH>       Where to write the output (default: ocr_output.md)
+--output <PATH>       Where to write the output (default: input file name with .md extension)
+--no-page-headers     Do not insert `# Page N` headers between pages
 ```
 
 ### Supported file types

@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use mistral_ocr::ImageMode;
+use mistral_ocr::{ImageMode, OcrOptions};
 use std::path::PathBuf;
 use tracing::error;
 
@@ -20,9 +20,14 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = CliImageMode::None)]
     images: CliImageMode,
 
-    /// Where to write the output (.md file, or .zip when --images zip)
-    #[arg(long, default_value = "ocr_output.md")]
-    output: PathBuf,
+    /// Where to write the output (.md file, or .zip when --images zip).
+    /// Defaults to the input file name with an .md extension.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Do not insert `# Page N` headers between pages of multi-page documents
+    #[arg(long)]
+    no_page_headers: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -46,15 +51,25 @@ impl From<CliImageMode> for ImageMode {
 
 fn main() {
     let cli = Cli::parse();
-    let image_mode: ImageMode = cli.images.into();
+    let options = OcrOptions {
+        image_mode: cli.images.into(),
+        page_headers: !cli.no_page_headers,
+    };
+    let output = cli.output.unwrap_or_else(|| cli.input.with_extension("md"));
 
     tracing_subscriber::fmt()
         .with_target(false)
         .without_time()
+        // rustls-platform-verifier warns about unreadable files in the system
+        // cert store; harmless noise as long as roots load
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,rustls_platform_verifier=error".into()),
+        )
         .init();
 
     let api_key = get_api_key();
-    if let Err(err) = mistral_ocr::run_ocr(&cli.input, image_mode, &cli.output, &api_key) {
+    if let Err(err) = mistral_ocr::run_ocr(&cli.input, options, &output, &api_key) {
         error!("{err:#}");
         std::process::exit(1);
     }
